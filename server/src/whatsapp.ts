@@ -79,7 +79,12 @@ export async function downloadFile(
   client: Client,
   whatsappId: string
 ): Promise<Base64 | null> {
-  const photoUrl = await client.getProfilePicUrl(whatsappId);
+  let photoUrl: string | undefined;
+  try {
+    photoUrl = await client.getProfilePicUrl(whatsappId);
+  } catch {
+    return null;
+  }
   if (!photoUrl) return null;
 
   const image = await MessageMedia.fromUrl(photoUrl);

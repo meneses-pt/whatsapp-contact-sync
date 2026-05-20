@@ -6,12 +6,15 @@ import { event } from "vue-gtag";
 
 export default defineComponent({
   data: () => ({
-    CLIENT_ID: "436316840541-2o1496o38gjv2udalq8tg32rao3ehdlv",
+    CLIENT_ID: import.meta.env.VITE_GOOGLE_CLIENT_ID || "436316840541-2o1496o38gjv2udalq8tg32rao3ehdlv",
+    API_KEY: import.meta.env.VITE_GOOGLE_API_KEY || "AIzaSyAy5TqbYpjFKzZq-ho-hS3aLkfVnAw9iBg",
     gisLoaded: false,
+    gapiLoaded: false,
     tokenClient: undefined as any, // Another Google typing workaround
   }),
   mounted() {
     this.addJSSrc("https://accounts.google.com/gsi/client", this.onGisLoaded);
+    this.addJSSrc("https://apis.google.com/js/api.js", this.onGapiLoaded);
   },
   methods: {
     // Most code here is based on https://developers.google.com/people/quickstart/js
@@ -33,6 +36,18 @@ export default defineComponent({
       });
       this.gisLoaded = true;
     },
+    async onGapiLoaded() {
+      gapi.load("client", this.initGapiClient);
+      this.gapiLoaded = true;
+    },
+    async initGapiClient() {
+      await gapi.client.init({
+        apiKey: this.API_KEY,
+        discoveryDocs: [
+          "https://www.googleapis.com/discovery/v1/apis/people/v1/rest",
+        ],
+      });
+    },
     handleAuthClick() {
       // if (!this.tokenClient) return;
       this.tokenClient.requestAccessToken({ prompt: "consent" });
@@ -42,7 +57,7 @@ export default defineComponent({
         throw resp;
       }
       event("google_authorized", { method: "Google" });
-      const token = resp;
+      const token = gapi.client.getToken();
       fetch("/api/init_gapi", {
         credentials: "include",
         method: "POST",
@@ -75,7 +90,7 @@ export default defineComponent({
         <div>
           <button
             @click="handleAuthClick"
-            :disabled="!gisLoaded"
+            :disabled="!gapiLoaded && !gisLoaded"
             id="signin-button"
             class="btn btn-outline btn-primary gap-4"
           >
