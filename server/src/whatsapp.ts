@@ -79,13 +79,33 @@ export async function downloadFile(
   client: Client,
   whatsappId: string
 ): Promise<Base64 | null> {
+  // getProfilePicUrl is flaky under the rapid bulk iteration of a full sync: it
+  // intermittently throws or returns undefined for contacts that DO have a photo.
+  // Retry a few times with a short backoff to recover these false negatives.
+  const maxAttempts = 3;
   let photoUrl: string | undefined;
-  try {
-    photoUrl = await client.getProfilePicUrl(whatsappId);
-  } catch {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      photoUrl = await client.getProfilePicUrl(whatsappId);
+      if (photoUrl) break;
+    } catch (e) {
+      lastError = e;
+    }
+    if (attempt < maxAttempts) {
+      await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
+    }
+  }
+
+  if (!photoUrl) {
+    if (lastError) {
+      console.log(`[sync] downloadFile ${whatsappId} — getProfilePicUrl threw after ${maxAttempts} attempts: ${(lastError as Error)?.message ?? lastError}`);
+    } else {
+      console.log(`[sync] downloadFile ${whatsappId} — getProfilePicUrl returned empty after ${maxAttempts} attempts (no photo / privacy restricted)`);
+    }
     return null;
   }
-  if (!photoUrl) return null;
 
   const image = await MessageMedia.fromUrl(photoUrl);
   return image.data;

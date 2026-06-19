@@ -63,10 +63,14 @@ export async function initSync(id: string, syncOptions: SyncOptions) {
     if (ws.readyState !== WebSocket.OPEN) return; // Stop sync if user disconnected.
 
     const isManualSync = syncOptions.manual_sync === "true";
+    const label = `${googleContact.name ?? "(no name)"} [${googleContact.numbers.join(", ") || "no numbers"}]`;
 
-    if (!isManualSync && syncOptions.overwrite_photos === "false" && googleContact.hasPhoto)
+    if (!isManualSync && syncOptions.overwrite_photos === "false" && googleContact.hasPhoto) {
+      console.log(`[sync] SKIP ${label} — already has a Google photo and overwrite is off`);
       continue;
+    }
 
+    let matched = false;
     for (const phoneNumber of googleContact.numbers) {
       let whatsappContactId: string | undefined;
 
@@ -88,9 +92,13 @@ export async function initSync(id: string, syncOptions: SyncOptions) {
         whatsappContactId = whatsappContacts.get(phoneNumber);
       }
       if (!whatsappContactId) continue;
+      matched = true;
 
       photo = await downloadFile(whatsappClient, whatsappContactId);
-      if (photo === null) break;
+      if (photo === null) {
+        console.log(`[sync] SKIP ${label} — matched WhatsApp ${phoneNumber} but no profile photo available (none set or private)`);
+        break;
+      }
 
       await limiter.removeTokens(1);
 
@@ -113,15 +121,23 @@ export async function initSync(id: string, syncOptions: SyncOptions) {
         }
 
         if (message.accept) {
+          console.log(`[sync] UPDATE ${label} — manual sync accepted`);
           await updateContactPhoto(gAuth, googleContact.id, photo);
+        } else {
+          console.log(`[sync] SKIP ${label} — manual sync rejected by user`);
         }
       } else {
+        console.log(`[sync] UPDATE ${label} — uploading WhatsApp photo`);
         await updateContactPhoto(gAuth, googleContact.id, photo);
       }
 
       syncCount++;
 
       break;
+    }
+
+    if (!matched) {
+      console.log(`[sync] SKIP ${label} — no matching WhatsApp contact for any of its numbers`);
     }
 
     sendEvent(ws, EventType.SyncProgress, {

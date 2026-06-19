@@ -74,6 +74,6 @@ export async function updateContactPhoto(
       requestBody: { photoBytes: photo },
     });
   } catch (e) {
-    console.error(e);
+    console.error(`[sync] FAIL updateContactPhoto for ${resourceName}:`, e);
   }
 }
