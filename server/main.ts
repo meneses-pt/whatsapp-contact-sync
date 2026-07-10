@@ -1,3 +1,5 @@
+import "dotenv/config"; // Load server/.env for local dev (no-op if vars are already set)
+
 import cors from "cors";
 import express from "express";
 import { Request, Response } from "express";
