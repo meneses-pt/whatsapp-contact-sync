@@ -50,12 +50,12 @@ export function initWhatsApp(id: string): Client {
       deleteFromCache(id, "purchased");
       try {
         client.destroy();
-      } catch (e) {}
+      } catch (e) { }
       sendEvent(ws, EventType.Redirect, "/contribute?show_error=true");
     }
   });
 
-  client.on("auth_failure", (msg) => {});
+  client.on("auth_failure", (msg) => { });
 
   client.initialize();
   return client;

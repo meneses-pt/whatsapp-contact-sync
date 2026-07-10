@@ -33,7 +33,7 @@ router.beforeEach(
   async (to: RouteLocationNormalized, from: RouteLocationNormalized) => {
     // Makes sure websocket is initialized.
     //  This is done on every request to make sure the server didn't discconect in the meantime.
-    initWs();
+    await initWs();
 
     // Don't make any checks for serving the index page.
     // This is done so the user can access it even if the backend is down.
@@ -50,20 +50,20 @@ router.beforeEach(
       status.enforcePayments &&
       !status.purchased
     )
-      router.push("/contribute");
+      return "/contribute";
     else if (to.path === "/contribute" && status.purchased)
-      router.push("/whatsapp");
+      return "/whatsapp";
     else if (
       ["/sync", "/gauth", "/options"].includes(to.path) &&
       !status.whatsappConnected
     )
-      router.push("/");
+      return "/";
     else if (to.path === "/sync" && !status.googleConnected)
-      router.push("/gauth");
+      return "/gauth";
     else if (to.path === "/whatsapp" && status.whatsappConnected)
-      router.push("/gauth");
+      return "/gauth";
     else if (to.path === "/gauth" && status.googleConnected)
-      router.push("/options");
+      return "/options";
   }
 );
 
