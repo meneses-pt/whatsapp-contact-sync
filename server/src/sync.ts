@@ -8,7 +8,11 @@ import { listContacts, updateContactPhoto } from "./gapi";
 import { downloadFile, loadContacts } from "./whatsapp";
 import { sendEvent, sendMessageAndWait } from "./ws";
 import { SimpleContact } from "./interfaces";
-import { getFromCache } from "./cache";
+import { getFromCache, setInCache, deleteFromCache } from "./cache";
+
+// How long to keep a sync running after the client's websocket goes away, so a
+// page reload (which briefly drops and re-opens the socket) doesn't kill it.
+const DISCONNECT_GRACE_MS = 20000;
 
 const getGooglePhotoAsBase64 = async (googleContact: SimpleContact): Promise<string | null> => {
   if (!googleContact.photoUrl) {
@@ -21,12 +25,52 @@ const getGooglePhotoAsBase64 = async (googleContact: SimpleContact): Promise<str
 }
 
 export async function initSync(id: string, syncOptions: SyncOptions) {
+  // Prevent a second concurrent sync for the same session. A page reload
+  // re-triggers /init_sync while the previous run is still going; without this
+  // guard both loops run in parallel and blow past Google's rate limit.
+  if (getFromCache(id, "syncing")) {
+    console.log("[sync] init_sync ignored — a sync is already running for this session");
+    return;
+  }
+  setInCache(id, "syncing", true);
+
+  try {
+    await runSync(id, syncOptions);
+  } finally {
+    deleteFromCache(id, "syncing");
+  }
+}
+
+async function runSync(id: string, syncOptions: SyncOptions) {
   // The limiter is implemented due to Google API's limit of 60 photo uploads per minute per user
   const limiter = new RateLimiter({ tokensPerInterval: 1, interval: 1500 });
 
-  const ws: WebSocket = getFromCache(id, "ws");
   const whatsappClient: Client = getFromCache(id, "whatsapp");
   const gAuth: Auth.OAuth2Client = getFromCache(id, "gauth");
+
+  // Always resolve the *latest* websocket for this session, so a client that
+  // reconnected after a reload keeps receiving progress (the old socket is dead).
+  const currentWs = (): WebSocket | undefined => getFromCache(id, "ws");
+
+  let lastSeenOpen = Date.now();
+  const clientGone = (): boolean => {
+    const ws = currentWs();
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      lastSeenOpen = Date.now();
+      return false;
+    }
+    // Tolerate a short gap (reload) before giving up on the client.
+    return Date.now() - lastSeenOpen > DISCONNECT_GRACE_MS;
+  };
+
+  // Send progress to the current socket and stash a lightweight copy (no image)
+  // in the cache so /sync_status can report an in-progress sync after a reload.
+  const emitProgress = (data: any): void => {
+    const { image, ...status } = data;
+    setInCache(id, "syncProgress", status);
+    const ws = currentWs();
+    if (ws && ws.readyState === WebSocket.OPEN) sendEvent(ws, EventType.SyncProgress, data);
+  };
 
   let googleContacts: SimpleContact[];
   let whatsappContacts: Map<string, string>;
@@ -34,20 +78,18 @@ export async function initSync(id: string, syncOptions: SyncOptions) {
   try {
     googleContacts = await listContacts(gAuth);
     whatsappContacts = await loadContacts(whatsappClient);
-    sendEvent(ws, EventType.SyncProgress, {
+    emitProgress({
       progress: 0,
       syncCount: 0,
       isManualSync: syncOptions.manual_sync === "true",
     });
   } catch (e) {
     console.error(e);
-    if (ws.readyState === WebSocket.OPEN) {
-      sendEvent(ws, EventType.SyncProgress, {
-        progress: 0,
-        syncCount: 0,
-        error: "Failed to load contacts, please try again.",
-      });
-    }
+    emitProgress({
+      progress: 0,
+      syncCount: 0,
+      error: "Failed to load contacts, please try again.",
+    });
     return;
   }
 
@@ -60,7 +102,10 @@ export async function initSync(id: string, syncOptions: SyncOptions) {
   const shuffledGoogleContacts = googleContacts.sort(() => Math.random() - 0.5);
 
   for (const [index, googleContact] of shuffledGoogleContacts.entries()) {
-    if (ws.readyState !== WebSocket.OPEN) return; // Stop sync if user disconnected.
+    if (clientGone()) {
+      console.log("[sync] stopping — client disconnected for more than the grace period");
+      return;
+    }
 
     const isManualSync = syncOptions.manual_sync === "true";
     const label = `${googleContact.name ?? "(no name)"} [${googleContact.numbers.join(", ") || "no numbers"}]`;
@@ -103,6 +148,11 @@ export async function initSync(id: string, syncOptions: SyncOptions) {
       await limiter.removeTokens(1);
 
       if (isManualSync) {
+        const ws = currentWs();
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          // Manual sync needs a live socket to ask the user; skip if none.
+          break;
+        }
         let message: any;
         try {
           const googlePhoto = await getGooglePhotoAsBase64(googleContact);
@@ -140,7 +190,7 @@ export async function initSync(id: string, syncOptions: SyncOptions) {
       console.log(`[sync] SKIP ${label} — no matching WhatsApp contact for any of its numbers`);
     }
 
-    sendEvent(ws, EventType.SyncProgress, {
+    emitProgress({
       progress: (index / googleContacts.length) * 100,
       syncCount: syncCount,
       totalContacts: googleContacts.length,
@@ -150,10 +200,11 @@ export async function initSync(id: string, syncOptions: SyncOptions) {
     photo = null;
   }
 
-  sendEvent(ws, EventType.SyncProgress, {
+  emitProgress({
     progress: 100,
     syncCount: syncCount,
   });
 
-  ws.close();
+  const ws = currentWs();
+  if (ws && ws.readyState === WebSocket.OPEN) ws.close();
 }

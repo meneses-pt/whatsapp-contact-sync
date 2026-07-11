@@ -125,6 +125,15 @@ router.get("/init_sync", (req: Request, res: Response) => {
   res.send("{}");
 });
 
+// Lets the frontend detect (e.g. after a page reload) that a sync is already
+// running for this session, so it can attach to it instead of starting a new one.
+router.get("/sync_status", (req: Request, res: Response) => {
+  res.send({
+    running: getFromCache(req.sessionID, "syncing") === true,
+    progress: getFromCache(req.sessionID, "syncProgress") ?? null,
+  });
+});
+
 router.post("/check_purchase", async (req: Request, res: Response) => {
   const email = req.body.email;
   const purchased = await checkPurchase(email);

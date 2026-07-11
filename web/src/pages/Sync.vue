@@ -29,7 +29,7 @@ export default defineComponent({
   mounted() {
     addHandler(EventType.SyncProgress, this.onSyncProgress);
     addHandler(EventType.SyncConfirm, this.onSyncConfirm);
-    this.initSync();
+    this.startOrAttach();
     setInterval(this.checkServerDisconnected, 5 * 1000);
     enforcePayments.then((val) => {
       this.showCoffeeButton = val;
@@ -37,6 +37,28 @@ export default defineComponent({
   },
 
   methods: {
+    async startOrAttach() {
+      // If a sync is already running for this session (e.g. the page was
+      // reloaded mid-sync), attach to it and seed the current progress instead
+      // of starting a second, parallel sync.
+      try {
+        const res = await fetch("/api/sync_status", { credentials: "include" });
+        const status = await res.json();
+        if (status.running) {
+          if (status.progress) {
+            this.syncProgress = status.progress.progress ?? 0;
+            this.syncCount = status.progress.syncCount ?? 0;
+            this.isManualSync = status.progress.isManualSync;
+            this.lastSyncReceived = Date.now();
+          }
+          return; // The running sync will keep streaming progress over the WS.
+        }
+      } catch (e) {
+        // Fall through and start a sync if the status check failed.
+      }
+      this.initSync();
+    },
+
     initSync() {
       fetch(`/api/init_sync${window.location.search}`, {
         credentials: "include",
