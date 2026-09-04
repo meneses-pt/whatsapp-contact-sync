@@ -10,6 +10,7 @@ import { Base64 } from "./types";
 import { EventType } from "../../interfaces/api";
 import { deleteFromCache, getFromCache } from "./cache";
 import { verifyPurchaseWAId } from "./payments";
+import { toE164Digits } from "./phone";
 
 const wwebVersion = "2.2407.3";
 const clientOptions = {
@@ -68,28 +69,81 @@ export async function loadContacts(
 
   const contactsMap: Map<string, string> = new Map();
   contacts.forEach((contact) => {
-    if (contact.id.user && contact.id._serialized)
-      contactsMap.set(contact.id.user, contact.id._serialized);
+    if (!contact.id.user || !contact.id._serialized) return;
+
+    // Key by the raw WhatsApp user id (international digits, no `+`) and, when
+    // parseable, its normalized E.164 form. Indexing both lets a legacy-format
+    // WhatsApp number and a canonical Google number meet in the middle.
+    contactsMap.set(contact.id.user, contact.id._serialized);
+    const normalized = toE164Digits("+" + contact.id.user);
+    if (normalized) contactsMap.set(normalized, contact.id._serialized);
   });
 
   return contactsMap;
+}
+
+/**
+ * Resolve a contact's profile-picture URL.
+ *
+ * whatsapp-web.js's `client.getProfilePicUrl()` passes an internal *chat* to
+ * WhatsApp's `requestProfilePicFromServer`. For a contact you have no open chat
+ * with — the majority of an address book — that chat is `null`, and the bridge
+ * throws while reading it, so the vast majority of contacts fail to resolve.
+ *
+ * Instead we resolve a proper Contact model (which every address-book contact
+ * has) and pass that, falling back to a chat and finally the raw wid. Returns
+ * the URL, `null` when the contact has no picture (or it's hidden by privacy),
+ * or `null` if none of the strategies could resolve it.
+ */
+async function resolveProfilePicUrl(
+  client: Client,
+  contactId: string
+): Promise<string | null> {
+  return await (client as any).pupPage.evaluate(async (contactId: string) => {
+    const req = (globalThis as any).require;
+    const bridge = req("WAWebContactProfilePicThumbBridge");
+    const collections = req("WAWebCollections");
+    const wid = req("WAWebWidFactory").createWid(contactId);
+
+    // undefined => strategy unusable, try the next one.
+    // null       => resolved, but there is no picture (stop).
+    // string     => the picture URL (stop).
+    const attempt = async (target: any): Promise<string | null | undefined> => {
+      if (!target) return undefined;
+      try {
+        const pic = await bridge.requestProfilePicFromServer(target);
+        return pic && pic.eurl ? pic.eurl : null;
+      } catch (e: any) {
+        if (e && e.name === "ServerStatusCodeError") return null; // no picture / hidden
+        return undefined; // unusable target — fall through to the next strategy
+      }
+    };
+
+    let result = await attempt(collections.Contact.get(wid));
+    if (result === undefined) result = await attempt(collections.Chat.get(wid));
+    if (result === undefined) result = await attempt(wid);
+    return result ?? null;
+  }, contactId);
 }
 
 export async function downloadFile(
   client: Client,
   whatsappId: string
 ): Promise<Base64 | null> {
-  // getProfilePicUrl is flaky under the rapid bulk iteration of a full sync: it
-  // intermittently throws or returns undefined for contacts that DO have a photo.
-  // Retry a few times with a short backoff to recover these false negatives.
+  // The Contact-model resolver above fixes the structural failure, but the
+  // bridge can still fail transiently under the rapid bulk iteration of a full
+  // sync. Retry a few times with a short backoff; a `null` result means the
+  // contact genuinely has no visible picture, so we stop immediately.
   const maxAttempts = 3;
-  let photoUrl: string | undefined;
+  let photoUrl: string | null = null;
   let lastError: unknown;
+  let resolved = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      photoUrl = await client.getProfilePicUrl(whatsappId);
-      if (photoUrl) break;
+      photoUrl = await resolveProfilePicUrl(client, whatsappId);
+      resolved = true;
+      break;
     } catch (e) {
       lastError = e;
     }
@@ -98,15 +152,23 @@ export async function downloadFile(
     }
   }
 
-  if (!photoUrl) {
-    if (lastError) {
-      console.log(`[sync] downloadFile ${whatsappId} — getProfilePicUrl threw after ${maxAttempts} attempts: ${(lastError as Error)?.message ?? lastError}`);
-    } else {
-      console.log(`[sync] downloadFile ${whatsappId} — getProfilePicUrl returned empty after ${maxAttempts} attempts (no photo / privacy restricted)`);
-    }
+  if (!resolved) {
+    console.error(`Failed to resolve profile picture for ${whatsappId} after ${maxAttempts} attempts:`, (lastError as Error)?.message ?? lastError);
     return null;
   }
 
-  const image = await MessageMedia.fromUrl(photoUrl);
-  return image.data;
+  if (!photoUrl) {
+    console.log(`[sync] downloadFile ${whatsappId} — no profile photo available (none set or privacy restricted)`);
+    return null;
+  }
+
+  // Guard the download: a single malformed/expired URL must not throw out of
+  // the un-awaited initSync and abort the whole run.
+  try {
+    const image = await MessageMedia.fromUrl(photoUrl);
+    return image.data;
+  } catch (e) {
+    console.error(`Failed to download profile picture for ${whatsappId}:`, (e as Error)?.message);
+    return null;
+  }
 }

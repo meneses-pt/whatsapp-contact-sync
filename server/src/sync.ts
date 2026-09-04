@@ -9,6 +9,7 @@ import { downloadFile, loadContacts } from "./whatsapp";
 import { sendEvent, sendMessageAndWait } from "./ws";
 import { SimpleContact } from "./interfaces";
 import { getFromCache, setInCache, deleteFromCache } from "./cache";
+import { inferRegion, matchCandidates } from "./phone";
 
 // How long to keep a sync running after the client's websocket goes away, so a
 // page reload (which briefly drops and re-opens the socket) doesn't kill it.
@@ -96,6 +97,10 @@ async function runSync(id: string, syncOptions: SyncOptions) {
   let syncCount: number = 0;
   let photo: string | null = null;
 
+  // The syncing user's own number tells us the default country to assume for
+  // contacts saved without a `+CC` prefix.
+  const region = inferRegion(whatsappClient.info?.wid?.user);
+
   // For some reason all of the contacts that don't have a photo are at the beginning of the array.
   // This causes the sync to feel slow since no photos show up on the UI.
   // To "fix" this, we shuffle the array so that the contacts without photos are spread out.
@@ -115,75 +120,72 @@ async function runSync(id: string, syncOptions: SyncOptions) {
       continue;
     }
 
+    // Guard each contact: initSync runs un-awaited, so a throw here (e.g. a bad
+    // photo URL) would become an unhandled rejection that silently ends the
+    // entire sync. Log it and move on to the next contact instead.
     let matched = false;
-    for (const phoneNumber of googleContact.numbers) {
-      let whatsappContactId: string | undefined;
+    try {
+      for (const phoneNumber of googleContact.numbers) {
+        let whatsappContactId: string | undefined;
 
-      // Fix for Brazilian numbers with extra '9'
-      if (
-        !whatsappContacts.has(phoneNumber) &&
-        phoneNumber.slice(0, 2) === "55"
-      ) {
-        if (phoneNumber.length === 12) {
-          whatsappContactId = whatsappContacts.get(
-            phoneNumber.slice(0, 4) + "9" + phoneNumber.slice(4)
-          );
-        } else {
-          whatsappContactId = whatsappContacts.get(
-            phoneNumber.slice(0, 4) + phoneNumber.slice(5)
-          );
+        // Normalize the Google number and try it against the WhatsApp map along
+        // with country-specific legacy spellings (e.g. Brazil's extra '9',
+        // Mexico's mobile '1'), matching on the first candidate that hits.
+        for (const candidate of matchCandidates(phoneNumber, region)) {
+          whatsappContactId = whatsappContacts.get(candidate);
+          if (whatsappContactId) break;
         }
-      } else {
-        whatsappContactId = whatsappContacts.get(phoneNumber);
-      }
-      if (!whatsappContactId) continue;
-      matched = true;
+        if (!whatsappContactId) continue;
+        matched = true;
 
-      photo = await downloadFile(whatsappClient, whatsappContactId);
-      if (photo === null) {
-        console.log(`[sync] SKIP ${label} — matched WhatsApp ${phoneNumber} but no profile photo available (none set or private)`);
-        break;
-      }
-
-      await limiter.removeTokens(1);
-
-      if (isManualSync) {
-        const ws = currentWs();
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-          // Manual sync needs a live socket to ask the user; skip if none.
+        photo = await downloadFile(whatsappClient, whatsappContactId);
+        if (photo === null) {
+          console.log(`[sync] SKIP ${label} — matched WhatsApp ${phoneNumber} but no profile photo available (none set or private)`);
           break;
         }
-        let message: any;
-        try {
-          const googlePhoto = await getGooglePhotoAsBase64(googleContact);
 
-          message = await sendMessageAndWait(ws,
-            EventType.SyncConfirm,
-            EventType.SyncPhotoConfirm,
-            {
-              existingPhoto: googlePhoto,
-              newPhoto: photo,
-              contactName: googleContact.name,
-            });
-        } catch (e) {
-          console.error("Error waiting for response message for manual sync confirmation", e);
-          continue;
-        }
+        await limiter.removeTokens(1);
 
-        if (message.accept) {
-          console.log(`[sync] UPDATE ${label} — manual sync accepted`);
-          await updateContactPhoto(gAuth, googleContact.id, photo);
+        if (isManualSync) {
+          const ws = currentWs();
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            // Manual sync needs a live socket to ask the user; skip if none.
+            break;
+          }
+          let message: any;
+          try {
+            const googlePhoto = await getGooglePhotoAsBase64(googleContact);
+
+            message = await sendMessageAndWait(ws,
+              EventType.SyncConfirm,
+              EventType.SyncPhotoConfirm,
+              {
+                existingPhoto: googlePhoto,
+                newPhoto: photo,
+                contactName: googleContact.name,
+              });
+          } catch (e) {
+            console.error("Error waiting for response message for manual sync confirmation", e);
+            continue;
+          }
+
+          if (message.accept) {
+            console.log(`[sync] UPDATE ${label} — manual sync accepted`);
+            await updateContactPhoto(gAuth, googleContact.id, photo);
+          } else {
+            console.log(`[sync] SKIP ${label} — manual sync rejected by user`);
+          }
         } else {
-          console.log(`[sync] SKIP ${label} — manual sync rejected by user`);
+          console.log(`[sync] UPDATE ${label} — uploading WhatsApp photo`);
+          await updateContactPhoto(gAuth, googleContact.id, photo);
         }
-      } else {
-        console.log(`[sync] UPDATE ${label} — uploading WhatsApp photo`);
-        await updateContactPhoto(gAuth, googleContact.id, photo);
+
+        syncCount++;
+
+        break;
       }
-
-      syncCount++;
-
-      break;
+    } catch (e) {
+      console.error(`Error syncing contact ${googleContact.id}:`, e);
     }
 
     if (!matched) {
