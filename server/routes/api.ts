@@ -56,13 +56,45 @@ router.ws("/ws", (ws: WebSocket, req: Request) => {
 });
 
 // Used by route guard
+// Races a promise against a deadline, always clearing the timer so a slow
+// probe can't leave a dangling handle behind.
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout;
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("timed out")), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 router.get("/status", async (req: Request, res: Response) => {
+  const client = getFromCache(req.sessionID, "whatsapp");
+
+  /*
+    Probing `client.getState()` goes through the same puppeteer page that a
+    running sync hammers with profile-pic requests. Under that load the probe
+    stalls or throws, and answering `false` makes the frontend's router guard
+    bounce the user off /sync back to the landing page mid-sync.
+
+    A failed probe is not evidence of a disconnect, so we fall back to the last
+    state we actually observed, and skip probing altogether while a sync is
+    running — the sync driving that client is itself proof it works.
+  */
   let whatsappConnected = false;
-  try {
-    whatsappConnected =
-      (await getFromCache(req.sessionID, "whatsapp")?.getState()) ===
-      WAState.CONNECTED;
-  } catch {}
+  if (client !== undefined) {
+    if (getFromCache(req.sessionID, "syncing") === true) {
+      whatsappConnected = true;
+    } else {
+      try {
+        whatsappConnected =
+          (await withTimeout(client.getState(), 2000)) === WAState.CONNECTED;
+        setInCache(req.sessionID, "whatsappConnected", whatsappConnected);
+      } catch {
+        whatsappConnected = getFromCache(req.sessionID, "whatsappConnected") === true;
+      }
+    }
+  }
 
   const status: SessionStatus = {
     whatsappConnected,
