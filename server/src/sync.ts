@@ -46,6 +46,12 @@ async function runSync(id: string, syncOptions: SyncOptions) {
   // The limiter is implemented due to Google API's limit of 60 photo uploads per minute per user
   const limiter = new RateLimiter({ tokensPerInterval: 1, interval: 1500 });
 
+  // Separate limiter for the WhatsApp side: WhatsApp throttles profile-picture
+  // requests, and the Google limiter above only paces contacts that actually
+  // yielded a photo — so a run that starts getting refused would otherwise
+  // speed up and hammer WhatsApp harder, keeping itself throttled.
+  const profilePicLimiter = new RateLimiter({ tokensPerInterval: 1, interval: 1000 });
+
   const whatsappClient: Client = getFromCache(id, "whatsapp");
   const gAuth: Auth.OAuth2Client = getFromCache(id, "gauth");
 
@@ -138,7 +144,7 @@ async function runSync(id: string, syncOptions: SyncOptions) {
         if (!whatsappContactId) continue;
         matched = true;
 
-        photo = await downloadFile(whatsappClient, whatsappContactId);
+        photo = await downloadFile(whatsappClient, whatsappContactId, profilePicLimiter);
         if (photo === null) {
           console.log(`[sync] SKIP ${label} — matched WhatsApp ${phoneNumber} but no profile photo available (none set or private)`);
           break;
