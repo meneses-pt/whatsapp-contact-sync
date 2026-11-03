@@ -35,10 +35,23 @@ router.beforeEach(
     //  This is done on every request to make sure the server didn't discconect in the meantime.
     await initWs();
 
-    // Don't make any checks for serving the index page.
-    // This is done so the user can access it even if the backend is down.
-    // Additionally, bots are allowed to access any page they want.
-    if (to.path == "/" || isbot(navigator.userAgent)) return;
+    // Bots are allowed to access any page they want.
+    if (isbot(navigator.userAgent)) return;
+
+    // Don't make any session checks for serving the index page, so the user can
+    // access it even if the backend is down. The one exception is a best-effort
+    // check for a sync in progress: if the user lands here mid-sync (reload,
+    // bounced by a guard, typed the URL), send them back to the progress page.
+    if (to.path == "/") {
+      try {
+        const res = await fetch("/api/sync_status", { credentials: "include" });
+        const sync = await res.json();
+        if (sync.running === true) return "/sync";
+      } catch (e) {
+        // Backend down or unreachable: just show the index page.
+      }
+      return;
+    }
 
     const response = await fetch("/api/status", { credentials: "include" });
     const status: SessionStatus = await response.json();

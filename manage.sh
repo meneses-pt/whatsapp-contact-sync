@@ -37,7 +37,14 @@ start() {
     # Start backend
     echo -e "${YELLOW}════ Backend (port 8080) ════${NC}"
     cd "$BACKEND_DIR"
-    npm run dev &
+    # "serve" has no file watcher. "dev" (nodemon) restarts the server on any
+    # file change, which kills a running sync and wipes the in-memory session.
+    # Use WATCH=1 ./manage.sh start when you want auto-restart while coding.
+    if [ "${WATCH:-0}" = "1" ]; then
+        npm run dev &
+    else
+        npm run serve &
+    fi
     BACKEND_PID=$!
     echo $BACKEND_PID > "$PID_FILE.backend"
 
