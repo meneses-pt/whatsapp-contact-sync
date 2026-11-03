@@ -1,5 +1,5 @@
 import Redis from "ioredis";
-import { enforcePayments } from "../main";
+import { enforcePayments } from "./config";
 
 const coffeeToken = process.env.COFFEE_TOKEN;
 const expires = 60 * 60 * 24 * 31; // 31 Days
@@ -70,8 +70,13 @@ export async function verifyPurchaseWAId(email: string, whatsappId: string) {
 
   const queriedWAId = await redisClient.get(email);
   if (queriedWAId === "") {
-    const ttl = await redisClient.ttl(email);
-    await redisClient.set(email, whatsappId, "EX", ttl);
+    // Preserve both expiring and permanent purchases without passing TTL -1
+    // to EX. XX also prevents recreating a purchase that expired after GET.
+    const result = await redisClient.set(email, whatsappId, "KEEPTTL", "XX");
+    if (result !== "OK") {
+      customerCache.delete(email);
+      return false;
+    }
     customerCache.set(email, whatsappId);
     return true;
   }
@@ -80,7 +85,9 @@ export async function verifyPurchaseWAId(email: string, whatsappId: string) {
 }
 
 export async function checkPurchase(email: string): Promise<boolean> {
+  if (!enforcePayments) return true;
   if (!emailRegex.test(email)) return false;
+  if (await queryPurchase(email)) return true;
   await queryCoffeePurchases();
   return await queryPurchase(email);
 }
